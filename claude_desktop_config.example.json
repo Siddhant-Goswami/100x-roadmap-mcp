@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "learning-coach": {
+      "command": "uv",
+      "args": [
+        "--directory", "/ABSOLUTE/PATH/TO/learning-coach-mcp",
+        "run", "server.py", "stdio"
+      ],
+      "env": {
+        "LEARNING_COACH_DATA": "/Users/YOUR_USERNAME/.learning-coach"
+      }
+    }
+  }
+}

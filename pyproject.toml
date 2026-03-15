@@ -1,0 +1,17 @@
+[project]
+name = "learning-coach-mcp"
+version = "1.0.0"
+description = "Personalised AI Learning Assistant — MCP Server for Claude Desktop"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.26.0",
+]
+
+[project.scripts]
+learning-coach = "server:mcp.run"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
