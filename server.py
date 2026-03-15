@@ -64,7 +64,6 @@ def _save(path: Path, data: Any) -> None:
 mcp = FastMCP(
     "Learning Coach",
     json_response=True,
-    version="1.0.0",
 )
 
 
