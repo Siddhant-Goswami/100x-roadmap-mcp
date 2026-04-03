@@ -31,6 +31,12 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import CallToolResult, TextContent
+
+# ─── MCP Apps UI ────────────────────────────────────────────────────────────
+RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
+ROADMAP_RESOURCE_URI = "ui://learning-coach/mcp-app.html"
+UI_HTML_PATH = Path(__file__).parent / "ui" / "dist" / "mcp-app.html"
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -256,21 +262,37 @@ def update_roadmap_phase(
     return {"error": f"Phase '{phase_name}' not found in roadmap."}
 
 
-@mcp.tool()
+@mcp.tool(
+    meta={"ui": {"resourceUri": ROADMAP_RESOURCE_URI}},
+)
 def get_roadmap() -> dict:
     """
     Get the full current roadmap with all phases, topics, and progress.
+    Renders an interactive roadmap.sh-style visualization in supporting hosts.
     """
     roadmap = _load(ROADMAP_FILE)
     if not roadmap:
-        return {"status": "No roadmap exists yet. Use generate_roadmap to create one."}
+        msg = "No roadmap exists yet. Use generate_roadmap to create one."
+        return CallToolResult(
+            content=[TextContent(type="text", text=msg)],
+            structuredContent={"status": msg},
+        )
 
-    # Enrich with progress data
     progress = _load(PROGRESS_FILE, default=[])
+    topics = _load(TOPICS_FILE)
     roadmap["total_sessions_logged"] = len(progress)
-    roadmap["current_week"] = _calculate_current_week(roadmap)
+    current_week = _calculate_current_week(roadmap)
+    roadmap["current_week"] = current_week
 
-    return roadmap
+    structured = {
+        "roadmap": roadmap,
+        "topics": topics,
+        "current_week": current_week,
+    }
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(structured, default=str))],
+        structuredContent=structured,
+    )
 
 
 # ─── Progress Tracking ──────────────────────────────────────────────────
@@ -367,11 +389,14 @@ def get_weekly_summary(week_number: int | None = None) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    meta={"ui": {"resourceUri": ROADMAP_RESOURCE_URI}},
+)
 def get_progress_dashboard() -> dict:
     """
     Get a comprehensive dashboard of overall learning progress.
     Shows streaks, topic mastery, phase completion, and recommendations.
+    Renders an interactive progress dashboard in supporting hosts.
     """
     profile = _load(LEARNER_FILE)
     roadmap = _load(ROADMAP_FILE)
@@ -379,7 +404,11 @@ def get_progress_dashboard() -> dict:
     topics = _load(TOPICS_FILE)
 
     if not profile.get("goal"):
-        return {"status": "Set a learning goal first with set_learning_goal."}
+        msg = "Set a learning goal first with set_learning_goal."
+        return CallToolResult(
+            content=[TextContent(type="text", text=msg)],
+            structuredContent={"status": msg},
+        )
 
     total_minutes = sum(e.get("duration_minutes", 0) for e in progress)
     current_week = _get_current_roadmap_week()
@@ -411,7 +440,7 @@ def get_progress_dashboard() -> dict:
     expected_total_hours = target_hours * weeks_active
     actual_total_hours = round(total_minutes / 60, 1)
 
-    return {
+    result = {
         "goal": profile.get("goal"),
         "current_week": current_week,
         "total_weeks": roadmap.get("total_weeks", "?"),
@@ -428,6 +457,10 @@ def get_progress_dashboard() -> dict:
             weak_topics, strong_topics, current_phase, actual_total_hours, expected_total_hours
         ),
     }
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(result, default=str))],
+        structuredContent=result,
+    )
 
 
 @mcp.tool()
@@ -520,6 +553,19 @@ def resource_topics() -> str:
     """The topic mastery graph."""
     topics = _load(TOPICS_FILE)
     return json.dumps(topics, indent=2) if topics else "No topics tracked."
+
+
+@mcp.resource(
+    ROADMAP_RESOURCE_URI,
+    mime_type=RESOURCE_MIME_TYPE,
+    name="Learning Coach UI",
+    description="Interactive roadmap and progress dashboard",
+)
+def resource_roadmap_ui() -> str:
+    """MCP Apps HTML resource for the interactive roadmap visualization."""
+    if not UI_HTML_PATH.exists():
+        return "<html><body>UI not built — run: cd ui && npm run build</body></html>"
+    return UI_HTML_PATH.read_text(encoding="utf-8")
 
 
 @mcp.resource("learning://this-week")

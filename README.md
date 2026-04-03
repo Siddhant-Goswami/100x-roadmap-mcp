@@ -63,6 +63,11 @@ Built with MCP Python SDK v1.26.0 | Runs as a Claude Desktop MCP Server
 - Current phase and week indicator
 - AI-generated recommendations based on your data
 
+### 🖥️ MCP App UI
+- Interactive in-host UI for roadmap and dashboard views
+- Automatically used by supporting MCP clients when calling key tools
+- Host-theme aware (uses MCP Apps style tokens and safe areas)
+
 ### 🔄 Adaptive Learning
 - Record roadmap adaptations with reasons
 - Full history of changes for reflection
@@ -94,6 +99,21 @@ uv run server.py http  # Start HTTP server
 # Then: npx @modelcontextprotocol/inspector
 # Connect to: http://localhost:8000/mcp
 ```
+
+### 2.5 Build the MCP UI (optional but recommended)
+
+The interactive MCP App UI is served from `ui/dist/mcp-app.html`.  
+If it is not built, the server falls back to a simple HTML message.
+
+```bash
+cd ui
+npm install
+npm run build
+```
+
+After build, the server exposes the UI resource:
+
+- `ui://learning-coach/mcp-app.html`
 
 ### 3. Connect to Claude Desktop
 
@@ -180,7 +200,17 @@ Edit your Claude Desktop config:
 | `learning://roadmap` | Full roadmap JSON |
 | `learning://progress` | All session logs |
 | `learning://topics` | Topic mastery graph |
+| `ui://learning-coach/mcp-app.html` | MCP App HTML (interactive roadmap/dashboard UI) |
 | `learning://this-week` | Quick current week summary |
+
+## MCP UI Rendering
+
+The following tools are UI-enabled and render the MCP App in supporting hosts:
+
+- `get_roadmap`
+- `get_progress_dashboard`
+
+Both return `structuredContent` plus a `ui` resource reference, allowing hosts to show a rich interactive view instead of plain text output.
 
 ## Prompts (reusable templates)
 
