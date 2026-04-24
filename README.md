@@ -1,279 +1,197 @@
-# 🧠 Learning Coach MCP Server
+# MedianMirror Roadmap MCP
 
-**A personalised AI learning assistant that generates hyper-personalised roadmaps using Claude's User Memory + MCP — without compromising memory privacy.**
+A local MCP server for a mentor-mentee learning program. Mentor drafts a
+personalised roadmap per mentee, mentee logs progress daily, mentee asks
+roadmap-aware curriculum questions. Everything is markdown files in a
+git repo — the mentor reads it on GitHub, the mentee reads it through
+Claude.
 
-Built with MCP Python SDK v1.26.0 | Runs as a Claude Desktop MCP Server
+Forked from `100x-roadmap-mcp` (v1) and extended for a 2-week pilot with
+one mentor and up to five mentees.
 
----
+## Architecture
 
-## The Core Idea
+- **One Python MCP server** (`server.py`) — local stdio, role-gated by
+  env vars.
+- **One pilot-data git repo** (separate, local clone at `PILOT_REPO_PATH`)
+  holding all mentee state + a snapshot of the Zeno curriculum wiki.
+- **One cron script** (`cron.py`) — runs once/day, emits emails via
+  Resend on milestones + drift.
+- **Four conversation patterns** in Claude Desktop — mentee onboarding,
+  mentee daily log, mentee curriculum question, mentor review.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        CLAUDE DESKTOP                            │
-│                                                                  │
-│   ┌──────────────────┐         ┌──────────────────────────────┐ │
-│   │  Claude's Native │         │   Learning Coach MCP Server  │ │
-│   │  User Memory     │         │                              │ │
-│   │                  │         │   Tools:                     │ │
-│   │  • Background    │ ──(1)──▶│   • set_learning_goal        │ │
-│   │  • Skills        │  Claude │   • generate_roadmap         │ │
-│   │  • Interests     │ reads & │   • log_learning_session     │ │
-│   │  • Preferences   │ passes  │   • get_progress_dashboard   │ │
-│   │  • Past projects │ context │   • get_weekly_summary       │ │
-│   │                  │         │   • adapt_roadmap            │ │
-│   │  ❌ NOT modified │         │                              │ │
-│   │  by this server  │         │   Local Storage:             │ │
-│   └──────────────────┘         │   ~/.learning-coach/         │ │
-│                                │   ├── learner_profile.json   │ │
-│                                │   ├── roadmap.json           │ │
-│                                │   ├── progress_log.json      │ │
-│                                │   └── topic_graph.json       │ │
-│                                └──────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
+Claude Desktop (mentor)          Claude Desktop (mentee)
+        │                                │
+        │    stdio                       │    stdio
+        ▼                                ▼
+     server.py  ──────────────────────────→  pilot-data/
+     (ROLE=mentor)              (ROLE=mentee, MENTEE_ID=arjun)
+                    git commits on every write
+                              ↑
+                              │
+                       cron.py (daily)
+                              │
+                              ▼
+                         Resend → mentor email
 ```
 
-**How memory privacy works:**
-1. Claude reads its own User Memory about you (background, skills, etc.)
-2. Claude summarises relevant context and passes it to the roadmap generator
-3. The MCP server stores only learning-specific data in a separate local directory
-4. Claude's User Memory is **never read or written to** by the MCP server
+## The nine tools
 
----
+| Tool | Role | Effect |
+|---|---|---|
+| `declare_position` | mentee | Seed roadmap frontmatter with goal/background/hours |
+| `generate_roadmap` | mentor | Write a draft roadmap for a mentee |
+| `approve_roadmap` | mentor | Flip draft → active (gate #1) |
+| `log_progress` | mentee | Append dated entry to progress log; optional milestone completion |
+| `query_curriculum` | mentee | Return roadmap-anchored context pack for host Claude to compose an answer |
+| `give_feedback` | mentor | Append to feedback log (gate #2) |
+| `revise_roadmap` | mentor | Produce a new draft; old preserved in git history |
+| `get_roadmap` | both (scoped) | Read current roadmap |
+| `get_progress_summary` | both (scoped) | Recent logs + drift signals |
 
-## Features
+Plus `search_curriculum` as a shared helper for mentors drafting roadmaps.
 
-### 🎯 Roadmap Generation
-- Multi-phase roadmaps personalised to your background
-- Specific topics, milestones, resources, and projects per phase
-- Adapts based on progress and changing needs
+## Pilot data repo layout
 
-### 📊 Progress Tracking
-- Log learning sessions with topic, duration, and confidence
-- Weekly summaries with hours, topics, and blockers
-- Daily streak tracking for motivation
+```
+medianmirror-pilot/
+├── mentees/<id>/
+│   ├── roadmap.md          # YAML frontmatter + prose body
+│   ├── progress-log.md     # append-only, dated
+│   └── feedback-log.md     # mentor-written
+├── mentor/roster.md
+├── curriculum/             # snapshot of Zeno wiki (96 markdown pages)
+│   ├── concepts/  entities/  sources/  synthesis/  index.md
+└── shared/cohort-context.md
+```
 
-### 🧬 Topic Mastery Graph
-- Tracks confidence per topic over time (weighted recent sessions higher)
-- Identifies weak areas needing attention
-- Shows strong foundations you can build on
+Every write from the MCP is a git commit authored as `role:id` (e.g.
+`mentor-mentor` or `mentee-arjun`). The mentor can read all of it in
+plain GitHub; the mentee can too, but usually works through Claude.
 
-### 📈 Smart Dashboard
-- Overall pace vs. target hours
-- Current phase and week indicator
-- AI-generated recommendations based on your data
-
-### 🖥️ MCP App UI
-- Interactive in-host UI for roadmap and dashboard views
-- Automatically used by supporting MCP clients when calling key tools
-- Host-theme aware (uses MCP Apps style tokens and safe areas)
-
-### 🔄 Adaptive Learning
-- Record roadmap adaptations with reasons
-- Full history of changes for reflection
-- Claude suggests adjustments during weekly check-ins
-
----
-
-## Quick Start
-
-### 1. Install
+## Setup
 
 ```bash
-# Clone or create the project
-git clone <your-repo> learning-coach-mcp
-cd learning-coach-mcp
+# 1. Clone both repos side-by-side
+git clone https://github.com/Siddhant-Goswami/100x-roadmap-mcp.git
+git clone https://github.com/Siddhant-Goswami/medianmirror-pilot.git
 
-# Install dependencies
-uv sync
+# 2. Install Python deps
+cd 100x-roadmap-mcp && uv sync
+
+# 3. (Optional) Build the UI
+cd ui && npm install && npm run build && cd ..
 ```
 
-### 2. Test Locally
+## Claude Desktop config
 
-```bash
-# Run the test client (exercises all tools)
-uv run test_client.py
-
-# Or test with MCP Inspector
-uv run server.py http  # Start HTTP server
-# Then: npx @modelcontextprotocol/inspector
-# Connect to: http://localhost:8000/mcp
-```
-
-### 2.5 Build the MCP UI (optional but recommended)
-
-The interactive MCP App UI is served from `ui/dist/mcp-app.html`.  
-If it is not built, the server falls back to a simple HTML message.
-
-```bash
-cd ui
-npm install
-npm run build
-```
-
-After build, the server exposes the UI resource:
-
-- `ui://learning-coach/mcp-app.html`
-
-### 3. Connect to Claude Desktop
-
-Edit your Claude Desktop config:
-
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-**Linux:** `~/.config/Claude/claude_desktop_config.json`
+Add two entries to
+`~/Library/Application Support/Claude/claude_desktop_config.json` —
+one for the mentor, one for each mentee you're testing.
 
 ```json
 {
   "mcpServers": {
-    "learning-coach": {
-      "command": "uv",
-      "args": [
-        "--directory", "/absolute/path/to/learning-coach-mcp",
-        "run", "server.py", "stdio"
-      ]
+    "medianmirror-mentor": {
+      "command": "/Users/you/.local/bin/uv",
+      "args": ["run", "--directory", "/path/to/100x-roadmap-mcp", "server.py", "stdio"],
+      "env": {
+        "ROLE": "mentor",
+        "PILOT_REPO_PATH": "/path/to/medianmirror-pilot"
+      }
+    },
+    "medianmirror-mentee-arjun": {
+      "command": "/Users/you/.local/bin/uv",
+      "args": ["run", "--directory", "/path/to/100x-roadmap-mcp", "server.py", "stdio"],
+      "env": {
+        "ROLE": "mentee",
+        "MENTEE_ID": "arjun",
+        "PILOT_REPO_PATH": "/path/to/medianmirror-pilot"
+      }
     }
   }
 }
 ```
 
-**Restart Claude Desktop** after editing.
+In practice, each mentee runs the MCP on their own laptop with their own
+`MENTEE_ID`, so there's no collision.
 
----
+## Running the cron
 
-## Usage — Conversation Flows
-
-### 🚀 First Time Setup
-
-> **You:** "I want to learn AI agent development. Can you create a learning roadmap for me?"
->
-> **Claude:** *(reads its memory about you, calls set_learning_goal, then generate_roadmap with your context, fills in each phase with update_roadmap_phase)*
->
-> "Based on your experience with Python and FastAPI, here's your 10-week roadmap..."
-
-### 📝 After a Study Session
-
-> **You:** "I just spent 45 minutes learning about RAG architectures"
->
-> **Claude:** *(calls log_learning_session with topic, duration, summary, confidence)*
->
-> "Logged! You're at 3 sessions this week. Your confidence in RAG is at 3/5 — want to dive deeper into retrieval strategies?"
-
-### 📅 Weekly Check-in
-
-> **You:** "Let's do a weekly check-in"
->
-> **Claude:** *(calls get_weekly_summary, get_progress_dashboard, get_roadmap)*
->
-> "Week 3 summary: 4 sessions, 3.5 hours. You're slightly behind your 12hr/week target. Strong on MCP fundamentals, but Tool Calling needs more practice. This week, focus on..."
-
-### 🔄 Adapting the Plan
-
-> **You:** "I'm finding the math prerequisites for ML harder than expected"
->
-> **Claude:** *(calls adapt_roadmap, then updates affected phases)*
->
-> "I've recorded this adaptation and adjusted your roadmap. I've added a 'Math Foundations' sprint to Week 4-5 before we hit the advanced ML topics..."
-
----
-
-## Tools Reference
-
-| Tool | Purpose |
-|------|---------|
-| `set_learning_goal` | Set/update your learning goal, target role, and schedule |
-| `get_learner_profile` | Retrieve your current profile and goal |
-| `generate_roadmap` | Create a personalised multi-phase roadmap |
-| `update_roadmap_phase` | Fill in specific topics, milestones, resources per phase |
-| `get_roadmap` | Get the full roadmap with progress |
-| `log_learning_session` | Log a study session (topic, duration, confidence) |
-| `get_weekly_summary` | Week-level summary of sessions and hours |
-| `get_progress_dashboard` | Full dashboard with pace, streaks, recommendations |
-| `get_topic_mastery` | All topics with confidence levels and time invested |
-| `adapt_roadmap` | Record and apply roadmap changes |
-
-## Resources (auto-available)
-
-| URI | Contents |
-|-----|----------|
-| `learning://profile` | Learner profile and goal |
-| `learning://roadmap` | Full roadmap JSON |
-| `learning://progress` | All session logs |
-| `learning://topics` | Topic mastery graph |
-| `ui://learning-coach/mcp-app.html` | MCP App HTML (interactive roadmap/dashboard UI) |
-| `learning://this-week` | Quick current week summary |
-
-## MCP UI Rendering
-
-The following tools are UI-enabled and render the MCP App in supporting hosts:
-
-- `get_roadmap`
-- `get_progress_dashboard`
-
-Both return `structuredContent` plus a `ui` resource reference, allowing hosts to show a rich interactive view instead of plain text output.
-
-## Prompts (reusable templates)
-
-| Prompt | Use Case |
-|--------|----------|
-| `get_learning_context` | Guides Claude to gather user context from memory |
-| `weekly_checkin` | Structured weekly review flow |
-| `end_of_session_log` | Quick logging after a study conversation |
-| `personalise_roadmap` | Full roadmap generation workflow |
-
----
-
-## Data Storage
-
-All data is stored locally in `~/.learning-coach/` (configurable via `LEARNING_COACH_DATA` env var):
-
-```
-~/.learning-coach/
-├── learner_profile.json    # Goal, role, schedule
-├── roadmap.json            # Full roadmap with phases
-├── progress_log.json       # All session entries
-└── topic_graph.json        # Topic mastery data
+```bash
+MENTOR_EMAIL=you@example.com \
+RESEND_API_KEY=re_... \
+PILOT_REPO_PATH=/path/to/medianmirror-pilot \
+REPO_LINK_BASE=https://github.com/you/medianmirror-pilot/blob/main \
+  uv run python cron.py
 ```
 
-Data is plain JSON — you can inspect, edit, or back it up manually.
+If `RESEND_API_KEY` or `MENTOR_EMAIL` is unset, events print to stdout —
+useful for dev. Schedule with `launchd` on macOS (daily at 06:00 IST is
+the spec default).
 
----
+Three rules, no LLM calls:
+1. **milestone** — any milestone with `completed_at == today`
+2. **inactivity** — ≥ `INACTIVITY_DAYS` (default 3) since last log
+3. **pace** — any non-completed milestone `target_week` is more than
+   `PACE_SLACK_WEEKS` (default 1) behind the mentee's current week
 
-## Architecture Decisions
+## The four conversation patterns
 
-### Why NOT read Claude's memory directly?
+**A. Mentee onboarding (one-time)**
 
-1. **Privacy**: Claude's User Memory may contain personal details unrelated to learning
-2. **Separation of concerns**: Learning state ≠ identity state
-3. **No API exists**: MCP servers cannot access Claude's internal memory system
-4. **Better design**: Claude acts as the *broker* — it knows the user and translates relevant context to the learning system
+> Mentee: "I'm Arjun. 3 years backend, no ML. I want to ship an AI agent
+> at work in 12 weeks. 10 hours/week."
+> Claude → `declare_position`.
 
-### Why local JSON instead of a database?
+**B. Mentee daily log (ritual)**
 
-1. **Zero dependencies**: No SQLite, no Postgres, nothing to install
-2. **Human-readable**: You can open and inspect your data anytime
-3. **Portable**: Copy the folder to move your learning history
-4. **Sufficient**: For a single-user learning assistant, JSON is plenty fast
+> Mentee: "Log today: 1.5h on RAG chunking, confidence 3, stuck on
+> semantic vs lexical."
+> Claude → `log_progress`, then offers `query_curriculum`.
 
-### Why stdio transport for Claude Desktop?
+**C. Mentee curriculum question (ad-hoc)**
 
-Claude Desktop uses stdio to communicate with local MCP servers. The server also supports Streamable HTTP for testing with MCP Inspector or for remote deployment.
+> Mentee: "When should I use semantic vs lexical chunking?"
+> Claude → `query_curriculum` → composes answer anchored to Week X and
+> mentee's goal, using only the returned curriculum pages.
 
----
+**D. Mentor review (on milestone or drift email)**
 
-## Extending This
+> Mentor: "Draft feedback for Arjun on m1 — praise the ship, flag
+> chunking confusion, tell him to hold on tool-calling."
+> Claude → `get_roadmap` + `get_progress_summary` → drafts → mentor
+> edits → `give_feedback`.
 
-Ideas for building on top of this:
+## Storage model
 
-- **Spaced repetition**: Use the topic mastery graph to schedule review sessions
-- **Resource scraping**: Add tools that fetch and summarise learning resources
-- **Calendar integration**: Connect to Google Calendar MCP to block study time
-- **LLM-powered summaries**: Call the Anthropic API from within tools for richer analysis
-- **Multi-learner support**: Add user_id parameter for cohort-based deployments
-- **Export to Notion/Obsidian**: Add tools that export roadmaps as markdown
+- **Source of truth**: the `medianmirror-pilot` git repo.
+- **Read cache**: in-memory dict in `storage.py`, invalidated on write.
+- **Writes**: file modify + `git add && git commit` (no automatic push;
+  push is manual or cron-scheduled).
+- **Curriculum**: read-only from the MCP; re-seed by re-cloning Zeno.
+- **Curriculum search**: BM25 over ~90 markdown pages, built once at
+  server startup.
 
----
+## What's deliberately not in the MVP
 
-## License
+- Topic mastery graphs, weekly summaries, adaptation history as their
+  own tools — v1 had these; they're noise for five mentees.
+- OAuth. Role comes from an env var at launch.
+- Auto-push to GitHub. The mentor runs `git push` (or a cron does).
+- The MCP itself calling Claude API. `query_curriculum` returns a
+  context pack; the host Claude composes the final answer. One LLM
+  call per mentee question, not two.
 
-MIT
+## Repo layout
+
+```
+.
+├── server.py          # FastMCP server, 9 tools + 1 helper
+├── storage.py         # git-backed read/write/append
+├── curriculum.py      # BM25 index over pilot-data/curriculum/
+├── cron.py            # daily drift + milestone checker
+├── ui/                # MCP Apps HTML UI (React + Vite)
+└── pyproject.toml
+```

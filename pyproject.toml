@@ -5,6 +5,7 @@ description = "Personalised AI Learning Assistant — MCP Server for Claude Desk
 requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=1.26.0",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
