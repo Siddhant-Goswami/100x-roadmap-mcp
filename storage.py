@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+AUTO_PUSH = os.environ.get("PILOT_AUTO_PUSH", "1") != "0"
 
 PILOT_REPO = Path(os.environ.get(
     "PILOT_REPO_PATH",
@@ -75,6 +78,22 @@ def _commit(relpath: str, msg: str, author: str) -> None:
         "-c", f"user.email={email}",
         "commit", "-q", "-m", msg,
     )
+    if AUTO_PUSH:
+        _push_best_effort()
+
+
+def _push_best_effort() -> None:
+    """Push to origin. Swallow failures so a flaky network doesn't
+    break the tool call — the commit is still local and next write
+    will try again."""
+    try:
+        subprocess.run(
+            ["git", "-C", str(PILOT_REPO), "push", "--quiet"],
+            capture_output=True, text=True, check=True, timeout=15,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        err = getattr(e, "stderr", "") or str(e)
+        print(f"[storage] push failed (non-fatal): {err}", file=sys.stderr)
 
 
 def list_mentees() -> list[str]:
