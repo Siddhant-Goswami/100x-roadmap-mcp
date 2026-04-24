@@ -10,6 +10,7 @@ Curriculum lives in pilot-data/curriculum/ and is read-only from here.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -40,14 +41,15 @@ def _author() -> str:
 
 
 def _require_role(required: str):
+    """Role gate. Uses functools.wraps so FastMCP's inspect.signature call
+    follows __wrapped__ back to the real signature — otherwise the tool
+    schema collapses to (*args, **kwargs) and clients can't call it."""
     def deco(fn: Callable) -> Callable:
+        @functools.wraps(fn)
         def wrapped(*args, **kwargs):
             if ROLE != required:
                 return {"error": f"this tool requires ROLE={required}, current ROLE={ROLE}"}
             return fn(*args, **kwargs)
-        wrapped.__name__ = fn.__name__
-        wrapped.__doc__ = fn.__doc__
-        wrapped.__annotations__ = fn.__annotations__
         return wrapped
     return deco
 
