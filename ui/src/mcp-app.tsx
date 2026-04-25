@@ -1,8 +1,11 @@
 /**
- * Learning Coach MCP App — roadmap.sh-style interactive visualization
- * Renders for two tools: get_roadmap and get_progress_dashboard
+ * MedianMirror MCP App
+ *
+ * Renders two views from the new MCP server shapes:
+ *   - get_roadmap          → Roadmap view (frontmatter + milestones + body markdown)
+ *   - get_progress_summary → Progress view (drift signals + recent log entries)
  */
-import { StrictMode, useRef, useState, useEffect } from "react";
+import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useApp } from "@modelcontextprotocol/ext-apps/react";
 import {
@@ -11,127 +14,161 @@ import {
   applyHostFonts,
 } from "@modelcontextprotocol/ext-apps";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Types ────────────────────────────────────────────────────────────────────
 
-interface Phase {
-  name: string;
-  duration_weeks: number;
-  start_week: number;
-  end_week: number;
-  topics: string[];
-  milestones: string[];
-  resources: string[];
-  projects: string[];
+interface Milestone {
+  id: string;
+  title: string;
+  target_week?: number;
+  status?: "not_started" | "in_progress" | "completed";
+  completed_at?: string;
 }
 
-interface TopicData {
-  name: string;
-  confidence: number;
-  sessions: number;
-  total_minutes: number;
-  last_studied?: string;
+interface DeclaredPosition {
+  background?: string;
+  goal?: string;
+  hours_per_week?: number;
 }
 
 interface RoadmapData {
-  roadmap: {
-    goal: string;
-    target_role: string;
-    experience_level: string;
-    total_weeks?: number;
-    deadline_weeks?: number;
-    phases: Phase[];
-  };
-  topics: Record<string, TopicData>;
-  current_week: number;
+  mentee_id: string;
+  status?: "awaiting_draft" | "draft" | "active";
+  version?: number;
+  current_week?: number | null;
+  declared_position?: DeclaredPosition;
+  milestones?: Milestone[];
+  body_markdown?: string;
 }
 
-interface DashboardData {
-  goal: string;
-  current_week: number;
-  total_weeks: number | string;
-  current_phase: string | null;
-  total_sessions: number;
-  total_hours: number;
-  expected_hours: number;
-  pace: "on_track" | "behind";
-  streak_days: number;
-  topics_explored: number;
-  strong_topics: Array<{ topic: string; confidence: number; sessions: number }>;
-  weak_topics: Array<{ topic: string; confidence: number; sessions: number }>;
-  recommendation: string;
+interface ProgressData {
+  mentee_id: string;
+  roadmap_status?: string;
+  current_week?: number | null;
+  last_log_date?: string | null;
+  days_since_last_log?: number | null;
+  drift_flag?: string | null;
+  recent_entries?: string[];
 }
 
-type ViewType = "roadmap" | "dashboard";
+type ViewType = "roadmap" | "progress";
 
-// ── Design tokens ─────────────────────────────────────────────────────────────
+// ── Tokens ───────────────────────────────────────────────────────────────────
 
 const C = {
   bg: "var(--color-background-primary, #0d1117)",
   card: "var(--color-background-secondary, #161b22)",
-  cardHover: "var(--color-background-tertiary, #1c2128)",
   text: "var(--color-text-primary, #e6edf3)",
   muted: "var(--color-text-secondary, #8b949e)",
   border: "var(--color-border-primary, #30363d)",
   font: "var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif)",
-  // Status
   green: "#3fb950",
   blue: "#58a6ff",
   yellow: "#d29922",
   red: "#f85149",
-  purple: "#bc8cff",
-  orange: "#ffa657",
   gray: "#484f58",
-  // Glow helpers
   greenBg: "rgba(63,185,80,0.1)",
   blueBg: "rgba(88,166,255,0.1)",
   yellowBg: "rgba(210,153,34,0.1)",
   redBg: "rgba(248,81,73,0.1)",
-  purpleBg: "rgba(188,140,255,0.1)",
   grayBg: "rgba(72,79,88,0.15)",
 };
 
-// ── Shared primitives ─────────────────────────────────────────────────────────
+// ── Minimal markdown renderer ────────────────────────────────────────────────
+// Handles headings, bold, italic, inline code, links, bullet/numbered lists,
+// and paragraphs. Good enough for roadmap bodies and progress log entries.
 
-function ProgressBar({
-  value,
-  color,
-  height = 5,
-}: {
-  value: number;
-  color: string;
-  height?: number;
-}) {
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderInline(line: string): string {
+  let s = escapeHtml(line);
+  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(?<!\*)\*(?!\*)([^*]+)\*(?!\*)/g, "<em>$1</em>");
+  s = s.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+  );
+  return s;
+}
+
+function mdToHtml(md: string): string {
+  const lines = md.split("\n");
+  const out: string[] = [];
+  let listType: "ul" | "ol" | null = null;
+  let para: string[] = [];
+
+  const flushPara = () => {
+    if (para.length) {
+      out.push(`<p>${renderInline(para.join(" "))}</p>`);
+      para = [];
+    }
+  };
+  const closeList = () => {
+    if (listType) {
+      out.push(`</${listType}>`);
+      listType = null;
+    }
+  };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) {
+      flushPara();
+      closeList();
+      continue;
+    }
+    const h = line.match(/^(#{1,3})\s+(.*)$/);
+    if (h) {
+      flushPara();
+      closeList();
+      out.push(`<h${h[1].length}>${renderInline(h[2])}</h${h[1].length}>`);
+      continue;
+    }
+    const ul = line.match(/^[-*]\s+(.*)$/);
+    if (ul) {
+      flushPara();
+      if (listType !== "ul") {
+        closeList();
+        out.push("<ul>");
+        listType = "ul";
+      }
+      out.push(`<li>${renderInline(ul[1])}</li>`);
+      continue;
+    }
+    const ol = line.match(/^\d+\.\s+(.*)$/);
+    if (ol) {
+      flushPara();
+      if (listType !== "ol") {
+        closeList();
+        out.push("<ol>");
+        listType = "ol";
+      }
+      out.push(`<li>${renderInline(ol[1])}</li>`);
+      continue;
+    }
+    closeList();
+    para.push(line);
+  }
+  flushPara();
+  closeList();
+  return out.join("\n");
+}
+
+function Markdown({ text }: { text: string }) {
   return (
-    <div
-      style={{
-        background: "rgba(255,255,255,0.07)",
-        borderRadius: height,
-        height,
-        overflow: "hidden",
-      }}
-    >
-      <div
-        style={{
-          background: color,
-          height: "100%",
-          width: `${Math.min(100, Math.max(0, value))}%`,
-          borderRadius: height,
-          transition: "width 0.5s cubic-bezier(.4,0,.2,1)",
-        }}
-      />
-    </div>
+    <div className="md-body" dangerouslySetInnerHTML={{ __html: mdToHtml(text) }} />
   );
 }
 
-function Badge({
-  label,
-  color,
-  bg,
-}: {
-  label: string;
-  color: string;
-  bg: string;
-}) {
+// ── Primitives ───────────────────────────────────────────────────────────────
+
+function Badge({ label, color, bg }: { label: string; color: string; bg: string }) {
   return (
     <span
       style={{
@@ -151,948 +188,331 @@ function Badge({
   );
 }
 
-// ── Topic chip with mastery colour ────────────────────────────────────────────
-
-function getTopicStyle(
-  name: string,
-  topics: Record<string, TopicData>
-): { color: string; bg: string; icon: string } {
-  const key = name.toLowerCase().trim();
-  const d = topics[key];
-  if (!d) return { color: C.gray, bg: C.grayBg, icon: "○" };
-  const c = d.confidence;
-  if (c >= 4) return { color: C.green, bg: C.greenBg, icon: "✓" };
-  if (c >= 3) return { color: C.blue, bg: C.blueBg, icon: "~" };
-  if (c >= 2) return { color: C.yellow, bg: C.yellowBg, icon: "⚡" };
-  return { color: C.red, bg: C.redBg, icon: "!" };
+function statusToken(status?: string): { label: string; color: string; bg: string } {
+  switch (status) {
+    case "active":
+      return { label: "Active", color: C.green, bg: C.greenBg };
+    case "draft":
+      return { label: "Draft (awaiting approval)", color: C.yellow, bg: C.yellowBg };
+    case "awaiting_draft":
+      return { label: "Awaiting mentor draft", color: C.blue, bg: C.blueBg };
+    default:
+      return { label: status ?? "unknown", color: C.gray, bg: C.grayBg };
+  }
 }
 
-function TopicChip({
-  name,
-  topics,
-}: {
-  name: string;
-  topics: Record<string, TopicData>;
-}) {
-  const s = getTopicStyle(name, topics);
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        padding: "3px 10px 3px 8px",
-        borderRadius: 100,
-        fontSize: 12,
-        fontWeight: 500,
-        background: s.bg,
-        color: s.color,
-        border: `1px solid ${s.color}28`,
-        whiteSpace: "nowrap",
-      }}
-    >
-      <span style={{ fontSize: 10, fontWeight: 700 }}>{s.icon}</span>
-      {name}
-    </span>
-  );
+function milestoneToken(status?: string): { color: string; bg: string; icon: string } {
+  switch (status) {
+    case "completed":
+      return { color: C.green, bg: C.greenBg, icon: "✓" };
+    case "in_progress":
+      return { color: C.blue, bg: C.blueBg, icon: "◐" };
+    default:
+      return { color: C.gray, bg: C.grayBg, icon: "○" };
+  }
 }
 
-// ── Phase status helpers ──────────────────────────────────────────────────────
-
-function phaseStatus(
-  phase: Phase,
-  currentWeek: number
-): "completed" | "active" | "upcoming" {
-  if (currentWeek > phase.end_week) return "completed";
-  if (currentWeek >= phase.start_week) return "active";
-  return "upcoming";
-}
-
-function phaseProgress(
-  phase: Phase,
-  topics: Record<string, TopicData>
-): number {
-  if (!phase.topics?.length) return 0;
-  const studied = phase.topics.filter(
-    (t) => topics[t.toLowerCase().trim()] !== undefined
-  ).length;
-  return Math.round((studied / phase.topics.length) * 100);
-}
-
-function phaseColor(status: "completed" | "active" | "upcoming"): string {
-  return status === "completed" ? C.green : status === "active" ? C.blue : C.gray;
-}
-
-// ── Phase card ────────────────────────────────────────────────────────────────
-
-function PhaseCard({
-  phase,
-  currentWeek,
-  topics,
-  isLast,
-  defaultOpen,
-}: {
-  phase: Phase;
-  currentWeek: number;
-  topics: Record<string, TopicData>;
-  isLast: boolean;
-  defaultOpen: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  const status = phaseStatus(phase, currentWeek);
-  const progress = phaseProgress(phase, topics);
-  const color = phaseColor(status);
-
-  const statusLabel =
-    status === "completed" ? "Completed" :
-    status === "active" ? "In Progress" : "Upcoming";
-  const statusBg =
-    status === "completed" ? C.greenBg :
-    status === "active" ? C.blueBg : C.grayBg;
-
-  return (
-    <div style={{ display: "flex", gap: 14 }}>
-      {/* Timeline track */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          width: 20,
-          flexShrink: 0,
-        }}
-      >
-        {/* Node circle */}
-        <div
-          style={{
-            width: 14,
-            height: 14,
-            borderRadius: "50%",
-            background: color,
-            border: `2px solid ${color}`,
-            boxShadow:
-              status === "active" ? `0 0 0 4px ${color}22` : undefined,
-            flexShrink: 0,
-            marginTop: 14,
-            zIndex: 1,
-          }}
-        />
-        {/* Connector line */}
-        {!isLast && (
-          <div
-            style={{
-              width: 2,
-              flex: 1,
-              background:
-                status === "completed"
-                  ? `linear-gradient(${C.green}, ${C.green}88)`
-                  : C.border,
-              minHeight: 16,
-              marginTop: 2,
-            }}
-          />
-        )}
-      </div>
-
-      {/* Card */}
-      <div
-        style={{
-          flex: 1,
-          background: C.card,
-          borderRadius: 10,
-          border: `1px solid ${status === "active" ? color + "44" : C.border}`,
-          marginBottom: isLast ? 0 : 10,
-          overflow: "hidden",
-          transition: "border-color 0.2s",
-        }}
-      >
-        {/* Header (always visible) */}
-        <div
-          style={{
-            padding: "11px 16px 10px",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            userSelect: "none",
-          }}
-          onClick={() => setOpen((v) => !v)}
-        >
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                marginBottom: 5,
-                flexWrap: "wrap",
-              }}
-            >
-              <span
-                style={{
-                  fontWeight: 700,
-                  fontSize: 14,
-                  color: C.text,
-                }}
-              >
-                {phase.name}
-              </span>
-              <Badge label={statusLabel} color={color} bg={statusBg} />
-            </div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                flexWrap: "wrap",
-              }}
-            >
-              <span style={{ fontSize: 12, color: C.muted }}>
-                Weeks {phase.start_week}–{phase.end_week} · {phase.duration_weeks}w
-              </span>
-              <span style={{ fontSize: 12, color, fontWeight: 600 }}>
-                {progress}% studied
-              </span>
-            </div>
-          </div>
-          {/* Progress bar + chevron */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              flexShrink: 0,
-            }}
-          >
-            <div style={{ width: 56 }}>
-              <ProgressBar value={progress} color={color} />
-            </div>
-            <span
-              style={{
-                color: C.muted,
-                fontSize: 13,
-                transform: open ? "rotate(180deg)" : "none",
-                transition: "transform 0.2s",
-                lineHeight: 1,
-              }}
-            >
-              ▾
-            </span>
-          </div>
-        </div>
-
-        {/* Expanded body */}
-        {open && (
-          <div
-            style={{
-              padding: "2px 16px 14px",
-              borderTop: `1px solid ${C.border}`,
-            }}
-          >
-            {/* Topics */}
-            {phase.topics?.length > 0 && (
-              <Section label="Topics">
-                <div
-                  style={{
-                    display: "flex",
-                    flexWrap: "wrap",
-                    gap: 6,
-                  }}
-                >
-                  {phase.topics.map((t, i) => (
-                    <TopicChip key={i} name={t} topics={topics} />
-                  ))}
-                </div>
-              </Section>
-            )}
-
-            {/* Milestones */}
-            {phase.milestones?.length > 0 && (
-              <Section label="Milestones">
-                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                  {phase.milestones.map((m, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        display: "flex",
-                        alignItems: "flex-start",
-                        gap: 8,
-                        fontSize: 13,
-                      }}
-                    >
-                      <span style={{ color: C.green, flexShrink: 0, marginTop: 1 }}>
-                        ◎
-                      </span>
-                      <span style={{ color: C.text }}>{m}</span>
-                    </div>
-                  ))}
-                </div>
-              </Section>
-            )}
-
-            {/* Projects */}
-            {phase.projects?.length > 0 && (
-              <Section label="Projects">
-                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                  {phase.projects.map((p, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        display: "flex",
-                        alignItems: "flex-start",
-                        gap: 8,
-                        fontSize: 13,
-                      }}
-                    >
-                      <span style={{ color: C.purple, flexShrink: 0, marginTop: 1 }}>
-                        ◆
-                      </span>
-                      <span style={{ color: C.text }}>{p}</span>
-                    </div>
-                  ))}
-                </div>
-              </Section>
-            )}
-
-            {/* Resources */}
-            {phase.resources?.length > 0 && (
-              <Section label="Resources">
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                  {phase.resources.map((r, i) => (
-                    <span
-                      key={i}
-                      style={{
-                        padding: "2px 9px",
-                        borderRadius: 5,
-                        fontSize: 12,
-                        background: C.purpleBg,
-                        color: C.purple,
-                        border: `1px solid ${C.purple}22`,
-                      }}
-                    >
-                      {r}
-                    </span>
-                  ))}
-                </div>
-              </Section>
-            )}
-
-            {/* Empty phase hint */}
-            {!phase.topics?.length &&
-              !phase.milestones?.length &&
-              !phase.projects?.length && (
-                <div
-                  style={{
-                    marginTop: 10,
-                    fontSize: 12,
-                    color: C.muted,
-                    fontStyle: "italic",
-                  }}
-                >
-                  Use update_roadmap_phase to add topics and milestones.
-                </div>
-              )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Section({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div style={{ marginTop: 12 }}>
-      <div
-        style={{
-          fontSize: 11,
-          color: C.muted,
-          fontWeight: 700,
-          textTransform: "uppercase",
-          letterSpacing: "0.07em",
-          marginBottom: 7,
-        }}
-      >
-        {label}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-// ── Roadmap view ──────────────────────────────────────────────────────────────
+// ── Roadmap view ─────────────────────────────────────────────────────────────
 
 function RoadmapView({ data }: { data: RoadmapData | null }) {
   if (!data) {
     return (
-      <div
-        style={{
-          padding: 32,
-          textAlign: "center",
-          color: C.muted,
-        }}
-      >
+      <div style={{ padding: 32, textAlign: "center", color: C.muted }}>
         <div style={{ fontSize: 28, marginBottom: 8 }}>🗺️</div>
         <div>Waiting for roadmap data…</div>
       </div>
     );
   }
 
-  // Error / empty state from server
-  if (!data.roadmap) {
-    return (
-      <div style={{ padding: 24, color: C.muted, fontSize: 13, textAlign: "center" }}>
-        No roadmap yet. Use <code>generate_roadmap</code> to create one.
-      </div>
-    );
-  }
-
-  const { roadmap, topics, current_week } = data;
-  const totalWeeks = roadmap.total_weeks ?? roadmap.deadline_weeks ?? 0;
-  const overallPct = totalWeeks > 0 ? (current_week / totalWeeks) * 100 : 0;
+  const sToken = statusToken(data.status);
+  const dp = data.declared_position ?? {};
+  const milestones = data.milestones ?? [];
+  const completed = milestones.filter((m) => m.status === "completed").length;
+  const totalMs = milestones.length;
 
   return (
     <div style={{ padding: "16px 18px 24px" }}>
-      {/* ── Header ── */}
+      {/* Header */}
       <div
         style={{
-          marginBottom: 20,
-          paddingBottom: 16,
+          marginBottom: 18,
+          paddingBottom: 14,
           borderBottom: `1px solid ${C.border}`,
         }}
       >
         <div
           style={{
-            fontSize: 17,
-            fontWeight: 800,
-            color: C.text,
-            marginBottom: 6,
-            lineHeight: 1.3,
-          }}
-        >
-          {roadmap.goal || "Learning Roadmap"}
-        </div>
-        <div
-          style={{
             display: "flex",
             alignItems: "center",
-            gap: 8,
-            marginBottom: 10,
+            gap: 10,
             flexWrap: "wrap",
+            marginBottom: 6,
           }}
         >
-          {roadmap.target_role && (
-            <Badge
-              label={roadmap.target_role}
-              color={C.blue}
-              bg={C.blueBg}
-            />
-          )}
-          {roadmap.experience_level && (
-            <span style={{ fontSize: 12, color: C.muted }}>
-              {roadmap.experience_level.charAt(0).toUpperCase() +
-                roadmap.experience_level.slice(1)}
-            </span>
-          )}
-          <span
-            style={{
-              fontSize: 12,
-              color: C.muted,
-              marginLeft: "auto",
-            }}
-          >
-            Week{" "}
-            <strong style={{ color: C.text }}>{current_week}</strong> of{" "}
-            <strong style={{ color: C.text }}>{totalWeeks || "?"}</strong>
+          <span style={{ fontSize: 17, fontWeight: 800, color: C.text }}>
+            {data.mentee_id}'s Roadmap
           </span>
+          <Badge label={sToken.label} color={sToken.color} bg={sToken.bg} />
+          {data.version != null && (
+            <span style={{ fontSize: 12, color: C.muted }}>v{data.version}</span>
+          )}
         </div>
-        {totalWeeks > 0 && (
-          <div
-            style={{ display: "flex", alignItems: "center", gap: 10 }}
-          >
-            <div style={{ flex: 1 }}>
-              <ProgressBar
-                value={overallPct}
-                color={C.blue}
-                height={6}
-              />
-            </div>
-            <span
-              style={{
-                fontSize: 11,
-                color: C.muted,
-                width: 32,
-                textAlign: "right",
-                flexShrink: 0,
-              }}
-            >
-              {Math.round(overallPct)}%
-            </span>
+        {dp.goal && (
+          <div style={{ fontSize: 13, color: C.text, marginBottom: 4 }}>
+            <strong style={{ color: C.muted, fontWeight: 600 }}>Goal:</strong>{" "}
+            {dp.goal}
           </div>
         )}
+        <div style={{ fontSize: 12, color: C.muted, display: "flex", gap: 14, flexWrap: "wrap" }}>
+          {dp.background && <span>📚 {dp.background}</span>}
+          {dp.hours_per_week != null && <span>⏱ {dp.hours_per_week}h/wk</span>}
+          {data.current_week != null && (
+            <span>
+              📍 Week <strong style={{ color: C.text }}>{data.current_week}</strong>
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* ── Legend ── */}
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          marginBottom: 16,
-          fontSize: 11,
-          color: C.muted,
-          flexWrap: "wrap",
-        }}
-      >
-        {[
-          { icon: "✓", color: C.green, label: "Confident (4-5)" },
-          { icon: "~", color: C.blue, label: "Learning (3)" },
-          { icon: "⚡", color: C.yellow, label: "Reviewing (2)" },
-          { icon: "○", color: C.gray, label: "Not started" },
-        ].map((l) => (
-          <span
-            key={l.label}
+      {/* Milestones */}
+      {totalMs > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <div
             style={{
+              fontSize: 11,
+              color: C.muted,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: "0.07em",
+              marginBottom: 8,
               display: "flex",
-              alignItems: "center",
-              gap: 4,
-              color: l.color,
+              gap: 8,
+              alignItems: "baseline",
             }}
           >
-            <span style={{ fontWeight: 700, fontSize: 10 }}>{l.icon}</span>
-            <span style={{ color: C.muted }}>{l.label}</span>
-          </span>
-        ))}
-      </div>
-
-      {/* ── Phases timeline ── */}
-      {roadmap.phases?.length > 0 ? (
-        <div>
-          {roadmap.phases.map((phase, i) => (
-            <PhaseCard
-              key={phase.name}
-              phase={phase}
-              currentWeek={current_week}
-              topics={topics || {}}
-              isLast={i === roadmap.phases.length - 1}
-              defaultOpen={
-                phaseStatus(phase, current_week) === "active" || i === 0
-              }
-            />
-          ))}
+            Milestones
+            <span style={{ color: C.text, fontSize: 11 }}>
+              {completed}/{totalMs} shipped
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {milestones.map((m) => {
+              const mt = milestoneToken(m.status);
+              return (
+                <div
+                  key={m.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "8px 12px",
+                    background: C.card,
+                    border: `1px solid ${mt.color}33`,
+                    borderRadius: 8,
+                  }}
+                >
+                  <span style={{ color: mt.color, fontSize: 14, width: 14 }}>
+                    {mt.icon}
+                  </span>
+                  <span style={{ fontSize: 12, color: C.muted, width: 64 }}>
+                    {m.target_week ? `Week ${m.target_week}` : "—"}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      fontSize: 13,
+                      color: C.text,
+                      fontWeight: 500,
+                    }}
+                  >
+                    {m.title}
+                  </span>
+                  <span style={{ fontSize: 11, color: C.muted }}>{m.id}</span>
+                  {m.completed_at && (
+                    <span style={{ fontSize: 11, color: C.green }}>
+                      ✓ {m.completed_at}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
-      ) : (
+      )}
+
+      {/* Body markdown */}
+      {data.body_markdown && (
         <div
           style={{
-            padding: 28,
+            background: C.card,
+            border: `1px solid ${C.border}`,
+            borderRadius: 10,
+            padding: "16px 20px",
+            fontSize: 13.5,
+            color: C.text,
+            lineHeight: 1.6,
+          }}
+        >
+          <Markdown text={data.body_markdown} />
+        </div>
+      )}
+
+      {/* Empty body hint */}
+      {!data.body_markdown && data.status === "awaiting_draft" && (
+        <div
+          style={{
+            padding: 24,
             textAlign: "center",
             background: C.card,
             borderRadius: 10,
             border: `1px dashed ${C.border}`,
             color: C.muted,
+            fontSize: 13,
           }}
         >
-          <div style={{ fontSize: 28, marginBottom: 8 }}>🗺️</div>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>Roadmap generated</div>
-          <div style={{ fontSize: 12 }}>
-            Use <code>update_roadmap_phase</code> to add topics and milestones to each phase.
-          </div>
+          Position declared. Mentor will draft the roadmap shortly.
         </div>
       )}
     </div>
   );
 }
 
-// ── Dashboard view ────────────────────────────────────────────────────────────
+// ── Progress view ────────────────────────────────────────────────────────────
 
-function StatCard({
-  value,
-  label,
-  sub,
-  color,
-}: {
-  value: string | number;
-  label: string;
-  sub?: string;
-  color?: string;
-}) {
-  return (
-    <div
-      style={{
-        background: C.card,
-        borderRadius: 10,
-        border: `1px solid ${C.border}`,
-        padding: "13px 15px",
-        flex: "1 1 0",
-        minWidth: 0,
-      }}
-    >
-      <div
-        style={{
-          fontSize: 22,
-          fontWeight: 800,
-          color: color ?? C.text,
-          lineHeight: 1,
-          marginBottom: 4,
-        }}
-      >
-        {value}
-      </div>
-      <div style={{ fontSize: 12, color: C.muted }}>{label}</div>
-      {sub && (
-        <div
-          style={{
-            fontSize: 11,
-            color: color ?? C.muted,
-            marginTop: 3,
-            opacity: 0.8,
-          }}
-        >
-          {sub}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TopicMasteryBar({
-  topic,
-  confidence,
-  sessions,
-  color,
-}: {
-  topic: string;
-  confidence: number;
-  sessions: number;
-  color: string;
-}) {
-  return (
-    <div style={{ marginBottom: 10 }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginBottom: 5,
-          fontSize: 13,
-        }}
-      >
-        <span style={{ color: C.text }}>{topic}</span>
-        <span style={{ color: C.muted, fontSize: 12 }}>
-          {sessions} session{sessions !== 1 ? "s" : ""}
-        </span>
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{ flex: 1 }}>
-          <ProgressBar value={(confidence / 5) * 100} color={color} />
-        </div>
-        <span
-          style={{
-            fontSize: 11,
-            color,
-            width: 24,
-            textAlign: "right",
-            flexShrink: 0,
-            fontWeight: 600,
-          }}
-        >
-          {confidence}/5
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function DashboardView({ data }: { data: DashboardData | null }) {
+function ProgressView({ data }: { data: ProgressData | null }) {
   if (!data) {
     return (
       <div style={{ padding: 32, textAlign: "center", color: C.muted }}>
-        <div style={{ fontSize: 28, marginBottom: 8 }}>📊</div>
-        <div>Waiting for dashboard data…</div>
+        <div style={{ fontSize: 28, marginBottom: 8 }}>📈</div>
+        <div>Waiting for progress data…</div>
       </div>
     );
   }
 
-  const isOnTrack = data.pace === "on_track";
-  const hoursPercent =
-    data.expected_hours > 0
-      ? (data.total_hours / data.expected_hours) * 100
-      : 100;
-  const paceColor = isOnTrack ? C.green : C.yellow;
+  const drift = data.drift_flag;
+  const driftBg = drift ? C.yellowBg : C.greenBg;
+  const driftColor = drift ? C.yellow : C.green;
+  const driftLabel = drift ? `Drift: ${drift}` : "On track";
+  const days = data.days_since_last_log;
+  const entries = data.recent_entries ?? [];
 
   return (
     <div style={{ padding: "16px 18px 24px" }}>
-      {/* ── Header ── */}
-      <div style={{ marginBottom: 16 }}>
+      <div
+        style={{
+          marginBottom: 16,
+          paddingBottom: 12,
+          borderBottom: `1px solid ${C.border}`,
+        }}
+      >
         <div
           style={{
             fontSize: 16,
             fontWeight: 800,
             color: C.text,
-            marginBottom: 3,
+            marginBottom: 6,
           }}
         >
-          Progress Dashboard
+          {data.mentee_id} — Progress
         </div>
-        <div style={{ fontSize: 12, color: C.muted }}>{data.goal}</div>
-      </div>
-
-      {/* ── Stats row ── */}
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          marginBottom: 12,
-          flexWrap: "wrap",
-        }}
-      >
-        <StatCard
-          value={data.total_sessions}
-          label="Sessions"
-          color={C.blue}
-        />
-        <StatCard
-          value={`${data.total_hours}h`}
-          label="Hours studied"
-          sub={`of ${data.expected_hours}h target`}
-          color={paceColor}
-        />
-        <StatCard
-          value={data.streak_days}
-          label="Day streak"
-          sub={data.streak_days > 0 ? "🔥 keep it up" : "start today"}
-          color={data.streak_days > 0 ? C.orange : C.muted}
-        />
-        <StatCard
-          value={data.topics_explored}
-          label="Topics"
-          color={C.purple}
-        />
-      </div>
-
-      {/* ── Phase / week / pace bar ── */}
-      <div
-        style={{
-          background: C.card,
-          borderRadius: 10,
-          border: `1px solid ${C.border}`,
-          padding: "12px 15px",
-          marginBottom: 12,
-          display: "flex",
-          alignItems: "center",
-          gap: 16,
-          flexWrap: "wrap",
-        }}
-      >
-        <div style={{ flex: 1, minWidth: 120 }}>
-          <div style={{ fontSize: 11, color: C.muted, marginBottom: 2 }}>
-            Current Phase
-          </div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>
-            {data.current_phase ?? "Not started"}
-          </div>
-        </div>
-        <div>
-          <div style={{ fontSize: 11, color: C.muted, marginBottom: 2 }}>
-            Week
-          </div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>
-            {data.current_week} / {data.total_weeks}
-          </div>
-        </div>
-        <Badge
-          label={isOnTrack ? "On Track ✓" : "Behind Schedule"}
-          color={paceColor}
-          bg={isOnTrack ? C.greenBg : C.yellowBg}
-        />
-      </div>
-
-      {/* ── Study hours bar ── */}
-      <div
-        style={{
-          background: C.card,
-          borderRadius: 10,
-          border: `1px solid ${C.border}`,
-          padding: "12px 15px",
-          marginBottom: 12,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginBottom: 8,
-            fontSize: 13,
-          }}
-        >
-          <span style={{ fontWeight: 600, color: C.text }}>
-            Study Hours Progress
-          </span>
-          <span style={{ color: C.muted, fontSize: 12 }}>
-            {data.total_hours}h / {data.expected_hours}h
-          </span>
-        </div>
-        <ProgressBar value={hoursPercent} color={paceColor} height={7} />
-      </div>
-
-      {/* ── Topic mastery ── */}
-      {(data.strong_topics?.length > 0 || data.weak_topics?.length > 0) && (
         <div
           style={{
             display: "flex",
             gap: 10,
-            marginBottom: 12,
             flexWrap: "wrap",
+            alignItems: "center",
           }}
         >
-          {data.strong_topics?.length > 0 && (
-            <div
-              style={{
-                flex: "1 1 180px",
-                background: C.card,
-                borderRadius: 10,
-                border: `1px solid ${C.border}`,
-                padding: "12px 15px",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  color: C.green,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.07em",
-                  marginBottom: 10,
-                }}
-              >
-                💪 Strengths
-              </div>
-              {data.strong_topics.map((t, i) => (
-                <TopicMasteryBar
-                  key={i}
-                  topic={t.topic}
-                  confidence={t.confidence}
-                  sessions={t.sessions}
-                  color={C.green}
-                />
-              ))}
-            </div>
+          <Badge label={driftLabel} color={driftColor} bg={driftBg} />
+          {data.current_week != null && (
+            <span style={{ fontSize: 12, color: C.muted }}>
+              Week <strong style={{ color: C.text }}>{data.current_week}</strong>
+            </span>
           )}
-          {data.weak_topics?.length > 0 && (
-            <div
-              style={{
-                flex: "1 1 180px",
-                background: C.card,
-                borderRadius: 10,
-                border: `1px solid ${C.border}`,
-                padding: "12px 15px",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  color: C.yellow,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.07em",
-                  marginBottom: 10,
-                }}
-              >
-                🔄 Needs Work
-              </div>
-              {data.weak_topics.map((t, i) => (
-                <TopicMasteryBar
-                  key={i}
-                  topic={t.topic}
-                  confidence={t.confidence}
-                  sessions={t.sessions}
-                  color={C.yellow}
-                />
-              ))}
-            </div>
+          {data.last_log_date && (
+            <span style={{ fontSize: 12, color: C.muted }}>
+              Last log <strong style={{ color: C.text }}>{data.last_log_date}</strong>
+              {days != null && ` (${days}d ago)`}
+            </span>
           )}
         </div>
-      )}
+      </div>
 
-      {/* ── Recommendation ── */}
-      {data.recommendation && (
+      {entries.length === 0 ? (
         <div
           style={{
-            background: C.blueBg,
+            padding: 24,
+            textAlign: "center",
+            background: C.card,
             borderRadius: 10,
-            border: `1px solid ${C.blue}33`,
-            padding: "12px 15px",
+            border: `1px dashed ${C.border}`,
+            color: C.muted,
+            fontSize: 13,
           }}
         >
-          <div
-            style={{
-              fontSize: 11,
-              color: C.blue,
-              fontWeight: 700,
-              marginBottom: 6,
-            }}
-          >
-            💡 RECOMMENDATION
-          </div>
-          <div
-            style={{
-              fontSize: 13,
-              color: C.text,
-              lineHeight: 1.65,
-            }}
-          >
-            {data.recommendation}
-          </div>
+          No log entries yet.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {entries.map((entry, i) => (
+            <div
+              key={i}
+              style={{
+                background: C.card,
+                border: `1px solid ${C.border}`,
+                borderRadius: 10,
+                padding: "12px 16px",
+                fontSize: 13,
+                lineHeight: 1.55,
+                color: C.text,
+              }}
+            >
+              <Markdown text={entry} />
+            </div>
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-// ── Root app ──────────────────────────────────────────────────────────────────
+// ── App ──────────────────────────────────────────────────────────────────────
 
-function LearningCoachApp() {
+function detectShape(sc: unknown): ViewType | null {
+  if (!sc || typeof sc !== "object") return null;
+  const o = sc as Record<string, unknown>;
+  if ("body_markdown" in o || "milestones" in o || "declared_position" in o) {
+    return "roadmap";
+  }
+  if ("recent_entries" in o || "drift_flag" in o || "days_since_last_log" in o) {
+    return "progress";
+  }
+  return null;
+}
+
+function App() {
   const [view, setView] = useState<ViewType | null>(null);
-  const [roadmapData, setRoadmapData] = useState<RoadmapData | null>(null);
-  const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
-  const viewRef = useRef<ViewType | null>(null);
+  const [roadmap, setRoadmap] = useState<RoadmapData | null>(null);
+  const [progress, setProgress] = useState<ProgressData | null>(null);
 
   const { app, error } = useApp({
-    appInfo: { name: "Learning Coach", version: "1.0.0" },
+    appInfo: { name: "MedianMirror Roadmap", version: "2.0.0" },
     capabilities: {},
     onAppCreated: (app) => {
       app.ontoolinput = (input) => {
-        if (input.name === "get_roadmap") {
-          viewRef.current = "roadmap";
-          setView("roadmap");
-        } else if (input.name === "get_progress_dashboard") {
-          viewRef.current = "dashboard";
-          setView("dashboard");
-        }
+        if (input.name === "get_roadmap") setView("roadmap");
+        else if (input.name === "get_progress_summary") setView("progress");
       };
 
       app.ontoolresult = (result) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const sc = result.structuredContent as any;
-        if (!sc) return;
-
-        // Detect view from data shape
-        if (sc.roadmap !== undefined) {
-          setRoadmapData(sc as RoadmapData);
+        const sc = result.structuredContent as unknown;
+        const shape = detectShape(sc);
+        if (shape === "roadmap") {
+          setRoadmap(sc as RoadmapData);
           setView("roadmap");
-          viewRef.current = "roadmap";
-        } else if (sc.total_sessions !== undefined) {
-          setDashboardData(sc as DashboardData);
-          setView("dashboard");
-          viewRef.current = "dashboard";
-        } else {
-          // Fallback to last known tool
-          const v = viewRef.current;
-          if (v === "roadmap") setRoadmapData(sc as RoadmapData);
-          else if (v === "dashboard") setDashboardData(sc as DashboardData);
+        } else if (shape === "progress") {
+          setProgress(sc as ProgressData);
+          setView("progress");
         }
       };
 
@@ -1110,7 +530,6 @@ function LearningCoachApp() {
     },
   });
 
-  // Apply base styles once
   useEffect(() => {
     Object.assign(document.body.style, {
       margin: "0",
@@ -1121,6 +540,25 @@ function LearningCoachApp() {
       lineHeight: "1.5",
       minHeight: "100vh",
     });
+    // Tighten markdown defaults
+    const style = document.createElement("style");
+    style.textContent = `
+      .md-body h1, .md-body h2, .md-body h3 {
+        margin: 0.6em 0 0.3em;
+        font-weight: 700;
+      }
+      .md-body h1 { font-size: 18px; }
+      .md-body h2 { font-size: 15px; color: ${C.text}; }
+      .md-body h3 { font-size: 14px; color: ${C.muted}; }
+      .md-body p  { margin: 0.4em 0; }
+      .md-body a  { color: ${C.blue}; text-decoration: none; }
+      .md-body a:hover { text-decoration: underline; }
+      .md-body code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+      .md-body ul, .md-body ol { padding-left: 1.4em; margin: 0.4em 0; }
+      .md-body li { margin: 0.15em 0; }
+      .md-body strong { color: ${C.text}; }
+    `;
+    document.head.appendChild(style);
   }, []);
 
   if (error) {
@@ -1144,25 +582,23 @@ function LearningCoachApp() {
           color: C.muted,
         }}
       >
-        <div style={{ fontSize: 36 }}>🎓</div>
-        <div style={{ fontSize: 14 }}>Learning Coach UI ready</div>
+        <div style={{ fontSize: 36 }}>🗺️</div>
+        <div style={{ fontSize: 14 }}>MedianMirror UI ready</div>
         <div style={{ fontSize: 12 }}>
-          Call <code>get_roadmap</code> or <code>get_progress_dashboard</code>
+          Call <code>get_roadmap</code> or <code>get_progress_summary</code>
         </div>
       </div>
     );
   }
 
-  const hasBoth = roadmapData !== null && dashboardData !== null;
+  const hasBoth = roadmap !== null && progress !== null;
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg }}>
-      {/* Tab bar — only when both views have data */}
       {hasBoth && (
         <div
           style={{
             display: "flex",
-            gap: 0,
             borderBottom: `1px solid ${C.border}`,
             background: C.card,
             position: "sticky",
@@ -1173,7 +609,7 @@ function LearningCoachApp() {
           {(
             [
               { id: "roadmap" as const, label: "🗺️  Roadmap" },
-              { id: "dashboard" as const, label: "📊  Dashboard" },
+              { id: "progress" as const, label: "📈  Progress" },
             ] as const
           ).map((tab) => (
             <button
@@ -1183,14 +619,15 @@ function LearningCoachApp() {
                 padding: "10px 18px",
                 background: "none",
                 border: "none",
-                borderBottom: `2px solid ${view === tab.id ? C.blue : "transparent"}`,
+                borderBottom: `2px solid ${
+                  view === tab.id ? C.blue : "transparent"
+                }`,
                 cursor: "pointer",
                 fontSize: 13,
                 fontWeight: 600,
                 color: view === tab.id ? C.text : C.muted,
                 marginBottom: -1,
                 fontFamily: C.font,
-                transition: "color 0.15s, border-color 0.15s",
               }}
             >
               {tab.label}
@@ -1198,15 +635,14 @@ function LearningCoachApp() {
           ))}
         </div>
       )}
-
-      {view === "roadmap" && <RoadmapView data={roadmapData} />}
-      {view === "dashboard" && <DashboardView data={dashboardData} />}
+      {view === "roadmap" && <RoadmapView data={roadmap} />}
+      {view === "progress" && <ProgressView data={progress} />}
     </div>
   );
 }
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <LearningCoachApp />
+    <App />
   </StrictMode>
 );
