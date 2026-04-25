@@ -505,13 +505,26 @@ function App() {
       };
 
       app.ontoolresult = (result) => {
-        const sc = result.structuredContent as unknown;
-        const shape = detectShape(sc);
+        let payload: unknown = result.structuredContent;
+        if (!detectShape(payload)) {
+          // Fallback: some hosts deliver the JSON only as text content.
+          const blocks = (result as { content?: Array<{ type: string; text?: string }> })
+            .content;
+          const firstText = blocks?.find((b) => b.type === "text")?.text;
+          if (firstText) {
+            try {
+              payload = JSON.parse(firstText);
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+        const shape = detectShape(payload);
         if (shape === "roadmap") {
-          setRoadmap(sc as RoadmapData);
+          setRoadmap(payload as RoadmapData);
           setView("roadmap");
         } else if (shape === "progress") {
-          setProgress(sc as ProgressData);
+          setProgress(payload as ProgressData);
           setView("progress");
         }
       };
